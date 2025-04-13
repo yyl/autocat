@@ -2,17 +2,9 @@ import sqlite3
 import polars as pl
 import random
 import os
+import argparse
 from datetime import datetime
 
-# Database connection parameters - replace with your actual database path
-DB_PATH = "../data/transactions.db"
-OUTPUT_DIR = "../data"  # Directory to save output files
-
-# Create output directory if it doesn't exist
-if not os.path.exists(OUTPUT_DIR):
-    os.makedirs(OUTPUT_DIR)
-
-# Connect to the SQLite database
 def get_data_by_year(conn, year, sample_size):
     """Query the database for records from a specific year and randomly sample them"""
     # Format the date condition
@@ -52,6 +44,21 @@ def get_data_by_year(conn, year, sample_size):
     return rows, columns
 
 def main():
+    # Set up command line argument parsing
+    parser = argparse.ArgumentParser(description='Sample data from SQLite database and split into training and test sets')
+    parser.add_argument('--db_path', type=str, required=True, help='Path to SQLite database file')
+    parser.add_argument('--output_dir', type=str, required=True, help='Directory to save output CSV files')
+    
+    args = parser.parse_args()
+    
+    # Get command line arguments
+    DB_PATH = args.db_path
+    OUTPUT_DIR = args.output_dir
+    
+    # Create output directory if it doesn't exist
+    if not os.path.exists(OUTPUT_DIR):
+        os.makedirs(OUTPUT_DIR)
+    
     # Sample sizes as specified
     samples = {
         '2024': 320,
