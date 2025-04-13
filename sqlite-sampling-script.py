@@ -5,59 +5,27 @@ import os
 import argparse
 from datetime import datetime
 
-def get_data_by_year(conn, year, sample_size):
-    """Query the database for records from a specific year and randomly sample them"""
-    # Format the date condition
-    start_date = f"01/01/{year}"
-    end_date = f"12/31/{year}"
+def parse_arguments():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(description='Sample records from SQLite database by year and create train/test splits')
     
-    # Get all IDs from the specified year
-    query = f"""
-    SELECT id FROM transactions
-    WHERE date >= ? AND date <= ?
-    """
+    parser.add_argument('--db_path', required=True, 
+                        help='Path to the SQLite database file')
     
-    cursor = conn.cursor()
-    cursor.execute(query, (start_date, end_date))
+    parser.add_argument('--output_dir', default='output',
+                        help='Directory to save output CSV files (default: output)')
     
-    # Fetch all IDs for the year
-    all_ids = [row[0] for row in cursor.fetchall()]
+    parser.add_argument('--table_name', default='transactions',
+                        help='Name of the table to query (default: transactions)')
     
-    # Randomly sample if we have more records than needed
-    if len(all_ids) > sample_size:
-        sampled_ids = random.sample(all_ids, sample_size)
-    else:
-        print(f"Warning: Only {len(all_ids)} records available for {year}, using all of them")
-        sampled_ids = all_ids
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Random seed for reproducibility (default: 42)')
     
-    # Get records for the sampled IDs
-    placeholders = ', '.join(['?'] * len(sampled_ids))
-    records_query = f"""
-    SELECT id, date FROM transactions
-    WHERE id IN ({placeholders})
-    """
-    
-    cursor.execute(records_query, sampled_ids)
-    columns = [description[0] for description in cursor.description]
-    rows = cursor.fetchall()
-    
-    return rows, columns
+    return parser.parse_args()
 
 def main():
-    # Set up command line argument parsing
-    parser = argparse.ArgumentParser(description='Sample data from SQLite database and split into training and test sets')
-    parser.add_argument('--db_path', type=str, required=True, help='Path to SQLite database file')
-    parser.add_argument('--output_dir', type=str, required=True, help='Directory to save output CSV files')
-    
-    args = parser.parse_args()
-    
-    # Get command line arguments
-    DB_PATH = args.db_path
-    OUTPUT_DIR = args.output_dir
-    
-    # Create output directory if it doesn't exist
-    if not os.path.exists(OUTPUT_DIR):
-        os.makedirs(OUTPUT_DIR)
+    # Parse command line arguments
+    args = parse_arguments()
     
     # Sample sizes as specified
     samples = {
@@ -66,30 +34,89 @@ def main():
         '2022': 20
     }
     
-    # Connect to the database
+    # Create output directory if it doesn't exist
+    if not os.path.exists(args.output_dir):
+        os.makedirs(args.output_dir)
+        print(f"Created output directory: {args.output_dir}")
+    
     try:
-        conn = sqlite3.connect(DB_PATH)
+        # Connect to the database
+        print(f"Connecting to database: {args.db_path}")
+        conn = sqlite3.connect(args.db_path)
+        cursor = conn.cursor()
         
-        # Lists to hold all sampled data and columns
+        # Create a set to track sampled IDs across all years (to ensure uniqueness)
+        all_sampled_ids = set()
         all_data = []
         columns = None
         
-        # Get samples for each year
+        # Process each year
         for year, sample_size in samples.items():
-            print(f"Sampling {sample_size} records from {year}...")
-            records, cols = get_data_by_year(conn, year, sample_size)
+            print(f"Sampling {sample_size} unique records from {year}...")
             
-            if columns is None:
-                columns = cols
+            # Format the date condition
+            start_date = f"01/01/{year}"
+            end_date = f"12/31/{year}"
             
-            all_data.extend(records)
-            print(f"Retrieved {len(records)} records for {year}")
+            # Get all IDs from the specified year (excluding already sampled IDs)
+            if all_sampled_ids:
+                placeholders = ', '.join(['?'] * len(all_sampled_ids))
+                query = f"""
+                SELECT id FROM {args.table_name}
+                WHERE date >= ? AND date <= ?
+                AND id NOT IN ({placeholders})
+                """
+                cursor.execute(query, (start_date, end_date, *all_sampled_ids))
+            else:
+                query = f"""
+                SELECT id FROM {args.table_name}
+                WHERE date >= ? AND date <= ?
+                """
+                cursor.execute(query, (start_date, end_date))
+            
+            # Fetch all available IDs for the year
+            available_ids = [row[0] for row in cursor.fetchall()]
+            
+            # Check if we have enough records
+            if len(available_ids) < sample_size:
+                print(f"Warning: Only {len(available_ids)} unique records available for {year}, using all of them")
+                sampled_ids = available_ids
+            else:
+                # Randomly sample unique IDs for this year
+                sampled_ids = random.sample(available_ids, sample_size)
+            
+            # Add these IDs to our tracking set
+            all_sampled_ids.update(sampled_ids)
+            
+            # Get full records for the sampled IDs
+            if sampled_ids:
+                placeholders = ', '.join(['?'] * len(sampled_ids))
+                records_query = f"""
+                SELECT * FROM {args.table_name}
+                WHERE id IN ({placeholders})
+                """
+                
+                cursor.execute(records_query, sampled_ids)
+                
+                if columns is None:
+                    columns = [description[0] for description in cursor.description]
+                
+                year_records = cursor.fetchall()
+                all_data.extend(year_records)
+                print(f"Retrieved {len(year_records)} records for {year}")
         
         # Convert to Polars DataFrame
         df = pl.DataFrame(all_data, schema=columns)
         
-        # Shuffle the data (Polars equivalent of sample frac=1)
-        df = df.sample(fraction=1.0, seed=42)
+        # Verify we have no duplicate IDs
+        unique_count = df.select(pl.col("id")).unique().height
+        if unique_count != len(df):
+            print(f"Warning: Found {len(df) - unique_count} duplicate IDs in the final dataset")
+        else:
+            print(f"Success: All {unique_count} IDs in the final dataset are unique")
+        
+        # Shuffle the data
+        df = df.sample(fraction=1.0, seed=args.seed)
         
         # Split into training (80%) and test (20%)
         split_index = int(len(df) * 0.8)
@@ -97,8 +124,8 @@ def main():
         test_df = df.slice(split_index, len(df) - split_index)
         
         # Save to CSV files
-        train_file = os.path.join(OUTPUT_DIR, "training_data.csv")
-        test_file = os.path.join(OUTPUT_DIR, "test_data.csv")
+        train_file = os.path.join(args.output_dir, "training_data.csv")
+        test_file = os.path.join(args.output_dir, "test_data.csv")
         
         train_df.write_csv(train_file)
         test_df.write_csv(test_file)
@@ -107,9 +134,10 @@ def main():
         print(f"Saved {len(test_df)} records to {test_file}")
         
         # Summary of the split
-        total_samples = sum(samples.values())
+        total_sampled = len(df)
+        total_requested = sum(samples.values())
         print("\nSummary:")
-        print(f"Total records sampled: {len(df)} out of {total_samples} requested")
+        print(f"Total records sampled: {total_sampled} out of {total_requested} requested")
         
         # Count records by year using Polars expressions
         for year in samples:
