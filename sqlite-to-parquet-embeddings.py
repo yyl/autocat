@@ -3,7 +3,7 @@ import polars as pl
 import numpy as np
 import argparse
 from sentence_transformers import SentenceTransformer
-import umap
+import umap.umap_ as umap
 
 def generate_embeddings(texts, model_name="sentence-transformers/paraphrase-multilingual-mpnet-base-v2"):
     """Generate embeddings for a list of texts."""
